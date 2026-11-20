@@ -32,10 +32,11 @@
 
 ```
 app/
-  main.py      FastAPI 入口（/、/health、/precheck、/docs）
+  main.py      FastAPI 入口（/、/health、/precheck、/jobs 系列、/docs）
   core.py      Dijkstra、下一跳集合、并集图与三色 DFS 找环
   models.py    请求/响应模型与输入校验
-tests/         pytest 自测（含同批错峰、ECMP、跨批次、暴力对照）
+  store.py     可续算作业：SQLite 持久化、两批并行核查、逐批保存
+tests/         pytest 自测（含同批错峰、ECMP、跨批次、暴力对照、作业续算）
 examples/      可直接提交的示例请求
 Dockerfile
 docker-compose.yml
@@ -49,7 +50,8 @@ docker compose up --build
 ```
 
 - 交互式文档：<http://localhost:8000/docs> （在 `/docs` 的 `POST /precheck`
-  上 "Try it out" 提交计划）
+  上 "Try it out" 提交计划；或用 `POST /jobs` 创建可续算作业后
+  `POST /jobs/{job_id}/run` 逐轮推进）
 - 健康检查：`GET http://localhost:8000/health`
 
 无 Docker 时本地运行：
@@ -109,6 +111,50 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 `via` 标出该跳取自哪一版下一跳：`old` / `new` / `both`。
 
+## 可续算作业（/jobs）
+
+大型割接要核查多批设备、预检服务可能中途重启时，用作业接口代替一次性
+`/precheck`：
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /jobs` | 创建作业：校验并**保存原计划**（目标、链路、分批），返回作业号；创建时不计算 |
+| `POST /jobs/{job_id}/run` | **续算一轮**：跳过已保存批次，未保存批次两批并行核查，算到首个危险批次确认或全部通过 |
+| `GET /jobs/{job_id}` | 查询进度：已保存的批次判定（含环证据）与已确认的结论 |
+| `GET /jobs` | 列出全部作业 |
+
+语义约定：
+
+- **逐批保存**：每批算完立即把判定（`pass` / `danger`，有环连同
+  `switched_devices`、`cycle_routers`、`forwarding_cycle` 证据）落盘到
+  SQLite。同一窗口内较晚批次可能先算完先落盘，属正常现象。
+- **结论规则**：某批有环且其前面各批都已保存为通过 ⇒ 确认它是**首个危险
+  批次**，后续批次不再启动（正在并行的同对批次允许算完并保存）；**全部
+  批次通过才报 `pass`**。
+- **续算**：计算失败或服务重启后，凭作业号再次 `POST /jobs/{job_id}/run`
+  即按原计划续算，已保存批次（不论保存先后）自动跳过；若崩溃发生在
+  “批次已保存、结论未落盘”之间，续算时先从已保存批次推导结论，能定则
+  直接补写，不重复计算。
+- **并发互斥**：同一作业同时收到多个续算请求时，只有一个推进一轮，其余
+  立即返回当前进度（响应中 `advanced=false`；实际推进的为 `true`）。
+  已完结的作业再续算同样返回 `advanced=false`。
+- **持久化位置**：SQLite 文件默认 `data/precheck_jobs.db`（容器内即
+  `/srv/data/precheck_jobs.db`），可用环境变量 `PRECHECK_DB` 覆盖；
+  docker-compose 已挂载命名卷 `precheck-data`，容器重建后作业不丢。
+
+示例（`examples/job_danger_second_batch.json` 为第二批才成环的计划）：
+
+```bash
+JOB=$(curl -s -X POST localhost:8000/jobs -H 'Content-Type: application/json' \
+      -d @examples/job_danger_second_batch.json | python3 -c "import json,sys;print(json.load(sys.stdin)['job_id'])")
+curl -s -X POST localhost:8000/jobs/$JOB/run   # 推进一轮：批1 pass、批2 danger 落盘，结论 danger@2，批3 不再算
+curl -s localhost:8000/jobs/$JOB               # 查看已保存批次与结论
+# 服务重启后直接再 run 同一作业号即可续算，已保存批次自动跳过
+```
+
+在 `/docs` 页面演示：`POST /jobs` 创建作业拿到 `job_id` → `POST
+/jobs/{job_id}/run` 推进 → `GET /jobs/{job_id}` 查看进度与结论。
+
 ## 自测
 
 ```bash
@@ -118,7 +164,10 @@ python -m pytest -q
 
 覆盖：同批错峰成环、等价路径并集成环、安全多批次、第二批才成环、
 单批 50 台上限等输入校验、断链拒绝、单路由器拓扑、结果确定性，
-以及 40 组随机拓扑的并集判环 vs 全状态暴力枚举对照。
+以及 40 组随机拓扑的并集判环 vs 全状态暴力枚举对照；
+作业部分覆盖：危险批次确认即停、全批通过才报通过、较晚批次先落盘后
+失败/重启续算并跳过已保存批次、并发续算只推进一轮、作业结果与
+`/precheck` 一致性、未知作业 404。
 
 ## 复杂度
 

@@ -11,6 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
+# 作业库目录（compose 挂载命名卷持久化，重启后续算不丢）
+RUN mkdir -p /srv/data
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

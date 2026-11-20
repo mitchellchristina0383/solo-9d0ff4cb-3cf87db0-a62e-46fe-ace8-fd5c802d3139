@@ -120,6 +120,69 @@ def find_cycle(adj: dict[str, set[str]]) -> list[str] | None:
     return None
 
 
+def compute_next_hops(
+    nodes: set[str], links: list[Link], target: str
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """按新旧两版代价分别计算到目标的全部等价下一跳集合。"""
+    old_adj = build_adjacency(nodes, links, "old_cost")
+    new_adj = build_adjacency(nodes, links, "new_cost")
+    old_dist = dijkstra_distances(old_adj, target)
+    new_dist = dijkstra_distances(new_adj, target)
+    return next_hop_sets(old_adj, old_dist), next_hop_sets(new_adj, new_dist)
+
+
+def check_batch(
+    nodes: set[str],
+    target: str,
+    batches: list[list[str]],
+    old_nh: dict[str, set[str]],
+    new_nh: dict[str, set[str]],
+    k: int,
+) -> dict | None:
+    """检查第 k 批（0 起）错峰切换期间是否可能成环。
+
+    返回 None 表示本批安全；否则返回危险证据（批次号为 1 起）。
+    """
+    batch_of: dict[str, int] = {}
+    for idx, batch in enumerate(batches):
+        for router in batch:
+            batch_of[router] = idx
+
+    batch_set = set(batches[k])
+    union_adj: dict[str, set[str]] = {n: set() for n in nodes}
+    for n in nodes:
+        if n == target:
+            continue
+        if batch_of[n] < k:
+            union_adj[n] = set(new_nh[n])
+        elif batch_of[n] > k:
+            union_adj[n] = set(old_nh[n])
+        elif n in batch_set:
+            union_adj[n] = old_nh[n] | new_nh[n]
+
+    cycle = find_cycle(union_adj)
+    if cycle is None:
+        return None
+
+    hops: list[dict] = []
+    switched: list[str] = []
+    for u, v in zip(cycle, cycle[1:]):
+        in_old = v in old_nh[u]
+        in_new = v in new_nh[u]
+        via = "both" if in_old and in_new else ("new" if in_new else "old")
+        hops.append({"router": u, "next_hop": v, "via": via})
+        # 本批路由器只有在该出边仅存在于新版下一跳时才必须已切换；
+        # 属于旧版（或两版皆有）的边无需切换即可采用。
+        if batch_of[u] == k and not in_old:
+            switched.append(u)
+    return {
+        "batch_index": k + 1,
+        "switched_devices": sorted(set(switched)),
+        "cycle_routers": cycle,
+        "forwarding_cycle": hops,
+    }
+
+
 def run_precheck(
     nodes: set[str],
     links: list[Link],
@@ -127,52 +190,12 @@ def run_precheck(
     batches: list[list[str]],
 ) -> dict:
     """执行完整预检，返回结构化结果字典。"""
-    old_adj = build_adjacency(nodes, links, "old_cost")
-    new_adj = build_adjacency(nodes, links, "new_cost")
-
-    old_dist = dijkstra_distances(old_adj, target)
-    new_dist = dijkstra_distances(new_adj, target)
-    old_nh = next_hop_sets(old_adj, old_dist)
-    new_nh = next_hop_sets(new_adj, new_dist)
-
-    batch_of: dict[str, int] = {}
-    for idx, batch in enumerate(batches):
-        for router in batch:
-            batch_of[router] = idx
+    old_nh, new_nh = compute_next_hops(nodes, links, target)
 
     dangerous: dict | None = None
-    for k, batch in enumerate(batches):
-        batch_set = set(batch)
-        union_adj: dict[str, set[str]] = {n: set() for n in nodes}
-        for n in nodes:
-            if n == target:
-                continue
-            if batch_of[n] < k:
-                union_adj[n] = set(new_nh[n])
-            elif batch_of[n] > k:
-                union_adj[n] = set(old_nh[n])
-            elif n in batch_set:
-                union_adj[n] = old_nh[n] | new_nh[n]
-
-        cycle = find_cycle(union_adj)
-        if cycle is not None:
-            hops: list[dict] = []
-            switched: list[str] = []
-            for u, v in zip(cycle, cycle[1:]):
-                in_old = v in old_nh[u]
-                in_new = v in new_nh[u]
-                via = "both" if in_old and in_new else ("new" if in_new else "old")
-                hops.append({"router": u, "next_hop": v, "via": via})
-                # 本批路由器只有在该出边仅存在于新版下一跳时才必须已切换；
-                # 属于旧版（或两版皆有）的边无需切换即可采用。
-                if batch_of[u] == k and not in_old:
-                    switched.append(u)
-            dangerous = {
-                "batch_index": k + 1,
-                "switched_devices": sorted(set(switched)),
-                "cycle_routers": cycle,
-                "forwarding_cycle": hops,
-            }
+    for k in range(len(batches)):
+        dangerous = check_batch(nodes, target, batches, old_nh, new_nh, k)
+        if dangerous is not None:
             break
 
     return {

@@ -109,3 +109,39 @@ class PrecheckResponse(BaseModel):
             ]
         }
     }
+
+
+# ---------------------------------------------------------------- 可续算作业
+class JobCreateResponse(BaseModel):
+    job_id: str = Field(..., description="作业号，凭它续算与查询")
+    target: str
+    batches_total: int
+    created_at: str
+
+
+class BatchRecord(BaseModel):
+    batch_index: int = Field(..., description="批次号（从 1 开始）")
+    result: str = Field(..., description="该批判定：pass 或 danger")
+    danger: Danger | None = Field(None, description="有环时保存的证据")
+    checked_at: str
+
+
+class Conclusion(BaseModel):
+    status: str = Field(..., description="pass（全批通过）或 danger")
+    first_danger_batch: int | None = Field(None, description="首个危险批次（从 1 开始）")
+    concluded_at: str
+
+
+class JobView(BaseModel):
+    job_id: str
+    target: str
+    created_at: str
+    batches_total: int
+    batches_checked: int = Field(..., description="已保存判定的批次数")
+    batches: list[BatchRecord] = Field(default_factory=list, description="已保存的批次判定")
+    conclusion: Conclusion | None = Field(None, description="已确认的结论，未算完为 null")
+    advanced: bool | None = Field(
+        None,
+        description="仅续算响应携带：本次请求是否实际推进了一轮；"
+        "并发续算或已完结时为 false，表示返回的是当前进度",
+    )

@@ -1,0 +1,12 @@
+{
+  "target": "T",
+  "links": [
+    {"a": "T", "b": "A", "old_cost": 20, "new_cost": 30},
+    {"a": "T", "b": "B", "old_cost": 5, "new_cost": 30},
+    {"a": "T", "b": "C", "old_cost": 30, "new_cost": 10},
+    {"a": "A", "b": "C", "old_cost": 20, "new_cost": 2},
+    {"a": "B", "b": "C", "old_cost": 2, "new_cost": 4},
+    {"a": "A", "b": "B", "old_cost": 1, "new_cost": 1}
+  ],
+  "batches": [["A"], ["B", "C"], ["T"]]
+}
